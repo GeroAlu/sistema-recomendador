@@ -75,4 +75,3 @@ def add_preference(pref: PreferenceInput):
         raise HTTPException(status_code=400, detail={"code": "DB_ERROR", "message": str(e)})
     finally:
         conn.close()
-

@@ -9,6 +9,7 @@ class User(BaseModel):
 class Item(BaseModel):
     id: int
     name: str
+    genre: Optional[str] = None
     attributes: Optional[dict] = {}
 
 class ItemArray(BaseModel):
