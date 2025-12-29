@@ -1,0 +1,6 @@
+scikit-learn
+pandas
+pydantic
+psycopg2-binary
+fastapi
+uvicorn[standard]
