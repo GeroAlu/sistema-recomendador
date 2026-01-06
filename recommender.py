@@ -43,8 +43,27 @@ class RecommenderEngine:
                 row = cur.fetchone()
                 if row and row['preferred_genres']:
                     data = row['preferred_genres']
-                    # Asegurar que sea lista
-                    preferred_genres = json.loads(data) if isinstance(data, str) else data
+                    # Asegurar que sea lista y soportar varios formatos (JSON string, Postgres array, lista)
+                    try:
+                        if isinstance(data, str):
+                            try:
+                                preferred_genres = json.loads(data)
+                            except Exception:
+                                # Intentar formato Postgres array: {a,b}
+                                s = data.strip()
+                                if s.startswith('{') and s.endswith('}'):
+                                    arr = s[1:-1].split(',')
+                                    preferred_genres = [x.strip().strip('\"') for x in arr if x.strip()]
+                                else:
+                                    preferred_genres = [data]
+                        elif isinstance(data, list):
+                            preferred_genres = data
+                        else:
+                            preferred_genres = list(data)
+                    except Exception as e:
+                        logger.debug("No se pudo parsear preferred_genres raw=%s: %s", data, e)
+                        preferred_genres = []
+                    logger.debug("Preferred genres for user %s parsed as: %s", user_id, preferred_genres)
             except Exception as e:
                 print(f"Error leyendo géneros: {e}")
 
@@ -68,8 +87,20 @@ class RecommenderEngine:
 
             if has_genre_col:
                 try:
-                    # normalizar preferred_genres a minúsculas para comparar con lower(i.genre)
+                    # normalizar preferred_genres a minúsculas para comparar (con soporte opcional para quitar acentos en DB)
                     prefs_norm = [self._normalize_text(g) for g in preferred_genres]
+
+                    # Check if DB has the unaccent extension available
+                    use_unaccent = False
+                    try:
+                        cur.execute("SELECT 1 FROM pg_extension WHERE extname = 'unaccent'")
+                        use_unaccent = cur.fetchone() is not None
+                    except Exception:
+                        try:
+                            cur.execute("SELECT unaccent('test')")
+                            use_unaccent = True
+                        except Exception:
+                            use_unaccent = False
 
                     # Hacemos consultas por género y combinamos de forma round-robin para asegurar cobertura
                     per_genre_rows = {g: [] for g in prefs_norm}
@@ -79,10 +110,16 @@ class RecommenderEngine:
                         like_clauses = []
                         params_q = []
                         for t in tokens:
-                            like_clauses.append("lower(i.genre) ILIKE %s")
-                            params_q.append(f"%{t}%")
-                            like_clauses.append("lower(i.attributes ->> 'genre') ILIKE %s")
-                            params_q.append(f"%{t}%")
+                            if use_unaccent:
+                                like_clauses.append("unaccent(lower(i.genre)) ILIKE unaccent(%s)")
+                                params_q.append(f"%{t}%")
+                                like_clauses.append("unaccent(lower(i.attributes ->> 'genre')) ILIKE unaccent(%s)")
+                                params_q.append(f"%{t}%")
+                            else:
+                                like_clauses.append("lower(i.genre) ILIKE %s")
+                                params_q.append(f"%{t}%")
+                                like_clauses.append("lower(i.attributes ->> 'genre') ILIKE %s")
+                                params_q.append(f"%{t}%")
                         if not like_clauses:
                             per_genre_rows[g] = []
                             continue
@@ -97,14 +134,18 @@ class RecommenderEngine:
                             LIMIT %s
                         """
                         params_q.append(n)
-                        try:
-                            logger.debug("Querying genre '%s' with tokens %s", g, tokens)
-                            cur.execute(q, tuple(params_q))
-                            rows_g = cur.fetchall()
-                            per_genre_rows[g] = rows_g if rows_g else []
-                            logger.debug("Found %s rows for genre token '%s'", len(per_genre_rows[g]), g)
-                        except Exception as e:
-                            logger.exception("Error en consulta por género %s: %s", g, e)
+                        logger.debug("use_unaccent=%s", use_unaccent)
+                    try:
+                        logger.debug("Querying genre '%s' with tokens %s", g, tokens)
+                        cur.execute(q, tuple(params_q))
+                        rows_g = cur.fetchall()
+                        per_genre_rows[g] = rows_g if rows_g else []
+                        logger.debug("Found %s rows for genre token '%s'", len(per_genre_rows[g]), g)
+                    except Exception as e:
+                        logger.exception("Error en consulta por género %s: %s", g, e)
+
+                    # Report counts per genre before interleaving
+                    logger.debug("per_genre_rows counts: %s", {gg: len(v) for gg, v in per_genre_rows.items()})
 
                     # Intercalar resultados por género para asegurar que todas las preferencias estén representadas
                     interleaved = []
@@ -164,15 +205,33 @@ class RecommenderEngine:
                     prefs_norm = [self._normalize_text(g) for g in preferred_genres]
 
                     per_genre_rows = {g: [] for g in prefs_norm}
+                    # Check if DB has the unaccent extension available for JSON-attribute queries as well
+                    use_unaccent = False
+                    try:
+                        cur.execute("SELECT 1 FROM pg_extension WHERE extname = 'unaccent'")
+                        use_unaccent = cur.fetchone() is not None
+                    except Exception:
+                        try:
+                            cur.execute("SELECT unaccent('test')")
+                            use_unaccent = True
+                        except Exception:
+                            use_unaccent = False
+
                     for g in prefs_norm:
                         tokens = [t for t in g.split() if t]
                         like_clauses = []
                         params_q = []
                         for t in tokens:
-                            like_clauses.append("lower(i.attributes ->> 'genre') ILIKE %s")
-                            params_q.append(f"%{t}%")
-                            like_clauses.append("lower(i.genre) ILIKE %s")
-                            params_q.append(f"%{t}%")
+                            if use_unaccent:
+                                like_clauses.append("unaccent(lower(i.attributes ->> 'genre')) ILIKE unaccent(%s)")
+                                params_q.append(f"%{t}%")
+                                like_clauses.append("unaccent(lower(i.genre)) ILIKE unaccent(%s)")
+                                params_q.append(f"%{t}%")
+                            else:
+                                like_clauses.append("lower(i.attributes ->> 'genre') ILIKE %s")
+                                params_q.append(f"%{t}%")
+                                like_clauses.append("lower(i.genre) ILIKE %s")
+                                params_q.append(f"%{t}%")
                         if not like_clauses:
                             per_genre_rows[g] = []
                             continue
@@ -187,14 +246,18 @@ class RecommenderEngine:
                             LIMIT %s
                         """
                         params_q.append(n)
-                        try:
-                            logger.debug("Querying JSON-genre '%s' with tokens %s", g, tokens)
-                            cur.execute(q, tuple(params_q))
-                            rows_g = cur.fetchall()
-                            per_genre_rows[g] = rows_g if rows_g else []
-                            logger.debug("Found %s rows for JSON-genre token '%s'", len(per_genre_rows[g]), g)
-                        except Exception as e:
-                            logger.exception("Error en consulta JSON-genre %s: %s", g, e)
+                    logger.debug("use_unaccent=%s", use_unaccent)
+                    try:
+                        logger.debug("Querying JSON-genre '%s' with tokens %s", g, tokens)
+                        cur.execute(q, tuple(params_q))
+                        rows_g = cur.fetchall()
+                        per_genre_rows[g] = rows_g if rows_g else []
+                        logger.debug("Found %s rows for JSON-genre token '%s'", len(per_genre_rows[g]), g)
+                    except Exception as e:
+                        logger.exception("Error en consulta JSON-genre %s: %s", g, e)
+
+                    # Report counts per genre before interleaving
+                    logger.debug("per_genre_rows (JSON) counts: %s", {gg: len(v) for gg, v in per_genre_rows.items()})
 
                     # Intercalar resultados por género para asegurar que todas las preferencias estén representadas
                     interleaved = []
@@ -284,23 +347,27 @@ class RecommenderEngine:
                         if not genre_val and isinstance(parsed, dict):
                             genre_val = parsed.get('genre') or parsed.get('genres')
 
-                        # flatten all text fields from attributes into one normalized string
-                        flat_text = ''
+                        # Only consider explicit genre-like keys in attributes to determine genre matches
+                        # This avoids matching on generic fields like 'tema' which can produce false positives.
+                        genre_keys = {'genre', 'genres', 'category', 'categories'}
+                        genre_text_parts = []
                         if isinstance(parsed, dict):
-                            parts = []
                             for k, v in parsed.items():
-                                if isinstance(v, list):
-                                    parts.extend([str(x) for x in v])
-                                else:
-                                    parts.append(str(v))
-                            flat_text = self._normalize_text(' '.join(parts))
+                                if k and k.lower() in genre_keys:
+                                    if isinstance(v, list):
+                                        genre_text_parts.extend([str(x) for x in v])
+                                    else:
+                                        genre_text_parts.append(str(v))
                         elif isinstance(attr, str):
-                            flat_text = self._normalize_text(attr)
+                            # if attributes is a plain string, use it conservatively
+                            genre_text_parts.append(str(attr))
 
-                        # compute a simple match score: number of preferred genres appearing as substring in flat_text
+                        genre_text = self._normalize_text(' '.join(genre_text_parts))
+
+                        # compute a simple match score based only on genre-related attribute text
                         match_score = 0
                         for pg in prefs_norm:
-                            if pg and pg in flat_text:
+                            if pg and pg in genre_text:
                                 match_score += 1
 
                         if match_score > 0:

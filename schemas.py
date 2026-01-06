@@ -5,6 +5,12 @@ class User(BaseModel):
     id: Optional[int] = None
     username: str
     attributes: Optional[dict] = {}
+    preferred_genres: Optional[List[str]] = None
+
+class UserCreate(BaseModel):
+    username: str
+    attributes: Optional[dict] = {}
+    preferred_genres: Optional[List[str]] = None
 
 class Item(BaseModel):
     id: int
