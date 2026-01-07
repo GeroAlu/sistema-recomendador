@@ -17,6 +17,8 @@ class Item(BaseModel):
     name: str
     genre: Optional[str] = None
     attributes: Optional[dict] = {}
+    recommendation_source: Optional[str] = "unknown"
+    score: Optional[float] = 0.0
 
 class ItemArray(BaseModel):
     items: List[Item]
@@ -28,5 +30,4 @@ class Error(BaseModel):
 class PreferenceInput(BaseModel):
     userId: int
     itemId: int
-    interactionType: str 
-    value: int           
+    interactionType: str           
