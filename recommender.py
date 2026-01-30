@@ -13,9 +13,7 @@ class RecommenderEngine:
     def __init__(self):
         pass
 
-    # ==========================================
-    # 1. HELPERS (Utilería y Limpieza)
-    # ==========================================
+    #  HELPERS (Utilería y Limpieza)
     
     def _parse_json_safe(self, data):
         """Intenta parsear JSON de forma segura."""
@@ -62,9 +60,7 @@ class RecommenderEngine:
             return []
         return []
 
-    # ==========================================
-    # 2. CORE: ESTRATEGIA DE LLENADO EN CASCADA (Waterfall)
-    # ==========================================
+    # ESTRATEGIA DE LLENADO EN CASCADA (Waterfall)
 
     def get_recommendations(self, user_id: int, n: int):
         dbConnection = get_db_connection()
@@ -125,9 +121,7 @@ class RecommenderEngine:
                 target_list.append(item)
                 seen_set.add(iid)
 
-    # ==========================================
-    # 3. MÉTODOS DE BÚSQUEDA (SQL CORREGIDO)
-    # ==========================================
+    # MÉTODOS DE BÚSQUEDA (SQL CORREGIDO)
 
     def _fetch_items_by_genres(self, dbConnection, genres, limit, exclude_ids=None):
         # Preparar patrones para búsqueda flexible (ej: '%Terror%')
@@ -169,7 +163,6 @@ class RecommenderEngine:
         """
         params = []
 
-        # --- CORRECCIÓN CRÍTICA DE SQL ---
         # Solo agregamos WHERE NOT si la lista NO está vacía
         if exclude_ids and len(exclude_ids) > 0:
             query += " WHERE NOT (i.id = ANY(%s))"
@@ -188,9 +181,7 @@ class RecommenderEngine:
             logger.error(f"Error SQL Popularity: {e}")
             return []
 
-    # ==========================================
-    # 4. ESTRATEGIA COLABORATIVA
-    # ==========================================
+    # ESTRATEGIA COLABORATIVA
 
     def _collaborative_strategy(self, dbConnection, user_id, n):
         try:
@@ -248,15 +239,6 @@ class RecommenderEngine:
                 lambda x: candidate_ids.index(x) if x in candidate_ids else 999
             )
             df_items = df_items.sort_values('sort_order').head(n)
-            
-            # Convert NaN attributes to {} if necessary, but RealDictCursor handles JSONs as dicts usually.
-            # However, DataFrame might have NaNs for missing columns? No, fetchall results are consistent.
-            
-            # Convert NaN attributes to {} if necessary, but RealDictCursor handles JSONs as dicts usually.
-            # However, DataFrame might have NaNs for missing columns? No, fetchall results are consistent.
-            
-            # Convert NaN attributes to {} if necessary, but RealDictCursor handles JSONs as dicts usually.
-            # However, DataFrame might have NaNs for missing columns? No, fetchall results are consistent.
             
             results = df_items.to_dict(orient='records')
             for item in results: 
