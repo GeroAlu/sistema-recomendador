@@ -13,9 +13,7 @@ class RecommenderEngine:
     def __init__(self):
         pass
 
-    # ==========================================
-    # 1. HELPERS (Utilería y Limpieza)
-    # ==========================================
+    #  HELPERS (Utilería y Limpieza)
     
     def _parse_json_safe(self, data):
         """Intenta parsear JSON de forma segura."""
@@ -47,10 +45,10 @@ class RecommenderEngine:
             "score": float(row.get('_score', 0.0))
         }
 
-    def _get_user_preferred_genres(self, conn, user_id):
+    def _get_user_preferred_genres(self, dbConnection, user_id):
         """Obtiene géneros preferidos del usuario de forma robusta."""
         try:
-            with conn.cursor() as cur:
+            with dbConnection.cursor() as cur:
                 cur.execute("SELECT preferred_genres FROM users WHERE id = %s", (user_id,))
                 row = cur.fetchone()
                 if row and row['preferred_genres']:
@@ -62,43 +60,41 @@ class RecommenderEngine:
             return []
         return []
 
-    # ==========================================
-    # 2. CORE: ESTRATEGIA DE LLENADO EN CASCADA (Waterfall)
-    # ==========================================
+    # ESTRATEGIA DE LLENADO EN CASCADA (Waterfall)
 
     def get_recommendations(self, user_id: int, n: int):
-        conn = get_db_connection()
+        dbConnection = get_db_connection()
         final_recs = []
         seen_ids = set() # Para evitar duplicados
         
         try:
             # --- PASO 1: Intentar Colaborativo (Si hay historial) ---
             has_history = False
-            with conn.cursor() as cur:
+            with dbConnection.cursor() as cur:
                 cur.execute("SELECT 1 FROM preferences WHERE user_id = %s LIMIT 1", (user_id,))
                 has_history = cur.fetchone() is not None
 
             if has_history:
                 logger.info(f"User {user_id}: Ejecutando Colaborativo...")
-                collab_items = self._collaborative_strategy(conn, user_id, n)
+                collab_items = self._collaborative_strategy(dbConnection, user_id, n)
                 self._add_unique_items(final_recs, seen_ids, collab_items, n)
 
             # --- PASO 2: Rellenar con Content-Based (Si faltan items) ---
             if len(final_recs) < n:
                 needed = n - len(final_recs)
-                genres = self._get_user_preferred_genres(conn, user_id)
+                genres = self._get_user_preferred_genres(dbConnection, user_id)
                 
                 if genres:
                     logger.info(f"User {user_id}: Ejecutando Content-Based (Géneros: {genres})...")
                     # Pasamos seen_ids para excluir lo que ya recomendó el colaborativo
-                    content_items = self._fetch_items_by_genres(conn, genres, needed, exclude_ids=seen_ids)
+                    content_items = self._fetch_items_by_genres(dbConnection, genres, needed, exclude_ids=seen_ids)
                     self._add_unique_items(final_recs, seen_ids, content_items, n)
 
             # --- PASO 3: Rellenar con Popularidad (Respaldo final) ---
             if len(final_recs) < n:
                 needed = n - len(final_recs)
                 logger.info(f"User {user_id}: Ejecutando Popularidad (Fallback)...")
-                pop_items = self._fetch_popular_items(conn, needed, exclude_ids=seen_ids)
+                pop_items = self._fetch_popular_items(dbConnection, needed, exclude_ids=seen_ids)
                 self._add_unique_items(final_recs, seen_ids, pop_items, n)
 
             logger.info(f"Recomendación final: {len(final_recs)} items generados.")
@@ -110,7 +106,7 @@ class RecommenderEngine:
             logger.error(f"Error CRÍTICO en get_recommendations: {e}")
             return []
         finally:
-            conn.close()
+            dbConnection.close()
 
     def _add_unique_items(self, target_list, seen_set, new_items, limit):
         """Agrega items a la lista final respetando el límite y sin duplicados."""
@@ -125,11 +121,9 @@ class RecommenderEngine:
                 target_list.append(item)
                 seen_set.add(iid)
 
-    # ==========================================
-    # 3. MÉTODOS DE BÚSQUEDA (SQL CORREGIDO)
-    # ==========================================
+    # MÉTODOS DE BÚSQUEDA (SQL CORREGIDO)
 
-    def _fetch_items_by_genres(self, conn, genres, limit, exclude_ids=None):
+    def _fetch_items_by_genres(self, dbConnection, genres, limit, exclude_ids=None):
         # Preparar patrones para búsqueda flexible (ej: '%Terror%')
         patterns = [f"%{g}%" for g in genres]
         
@@ -152,7 +146,7 @@ class RecommenderEngine:
         params.append(limit)
 
         try:
-            with conn.cursor() as cur:
+            with dbConnection.cursor() as cur:
                 cur.execute(query, params)
                 results = cur.fetchall()
                 for item in results: item['_source'] = 'content-based'
@@ -161,7 +155,7 @@ class RecommenderEngine:
             logger.error(f"Error SQL Content-Based: {e}")
             return []
 
-    def _fetch_popular_items(self, conn, limit, exclude_ids=None):
+    def _fetch_popular_items(self, dbConnection, limit, exclude_ids=None):
         query = """
             SELECT i.id, i.name, i.genre, i.attributes, i.author, i.price
             FROM items i
@@ -169,7 +163,6 @@ class RecommenderEngine:
         """
         params = []
 
-        # --- CORRECCIÓN CRÍTICA DE SQL ---
         # Solo agregamos WHERE NOT si la lista NO está vacía
         if exclude_ids and len(exclude_ids) > 0:
             query += " WHERE NOT (i.id = ANY(%s))"
@@ -179,7 +172,7 @@ class RecommenderEngine:
         params.append(limit)
 
         try:
-            with conn.cursor() as cur:
+            with dbConnection.cursor() as cur:
                 cur.execute(query, params)
                 results = cur.fetchall()
                 for item in results: item['_source'] = 'popular'
@@ -188,14 +181,12 @@ class RecommenderEngine:
             logger.error(f"Error SQL Popularity: {e}")
             return []
 
-    # ==========================================
-    # 4. ESTRATEGIA COLABORATIVA
-    # ==========================================
+    # ESTRATEGIA COLABORATIVA
 
-    def _collaborative_strategy(self, conn, user_id, n):
+    def _collaborative_strategy(self, dbConnection, user_id, n):
         try:
             # 1. Cargar preferencias
-            with conn.cursor() as cur:
+            with dbConnection.cursor() as cur:
                 cur.execute("SELECT user_id, item_id, value FROM preferences")
                 data = cur.fetchall()
             df_all = pd.DataFrame(data)
@@ -237,7 +228,7 @@ class RecommenderEngine:
                 query_items = "SELECT * FROM items WHERE id IN %s"
                 params = (tuple(candidate_ids),)
 
-            with conn.cursor() as cur:
+            with dbConnection.cursor() as cur:
                 cur.execute(query_items, params)
                 items_data = cur.fetchall()
             
@@ -248,15 +239,6 @@ class RecommenderEngine:
                 lambda x: candidate_ids.index(x) if x in candidate_ids else 999
             )
             df_items = df_items.sort_values('sort_order').head(n)
-            
-            # Convert NaN attributes to {} if necessary, but RealDictCursor handles JSONs as dicts usually.
-            # However, DataFrame might have NaNs for missing columns? No, fetchall results are consistent.
-            
-            # Convert NaN attributes to {} if necessary, but RealDictCursor handles JSONs as dicts usually.
-            # However, DataFrame might have NaNs for missing columns? No, fetchall results are consistent.
-            
-            # Convert NaN attributes to {} if necessary, but RealDictCursor handles JSONs as dicts usually.
-            # However, DataFrame might have NaNs for missing columns? No, fetchall results are consistent.
             
             results = df_items.to_dict(orient='records')
             for item in results: 
