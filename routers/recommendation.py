@@ -5,14 +5,13 @@ from recommender import RecommenderEngine
 router = APIRouter(tags=["Recomendaciones"])
 engine = RecommenderEngine()
 
-# --- ENDPOINT RECOMENDAR ---
+
 @router.get("/user/{userId}/recommend", response_model=ItemArray, responses={404: {"model": Error}})
 def recommend(
     userId: int = Path(..., description="ID del usuario"), 
     n: int = Query(..., description="Numero de items a recomendar")
 ):
     try:
-        # DELEGACIÓN TOTAL: El engine ya nos devuelve una lista de diccionarios limpios
         results = engine.get_recommendations(userId, n)
         return ItemArray(items=results)
         
