@@ -1,66 +1,17 @@
 import logging
 import pandas as pd
-import json
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from database import get_db_connection
+from helpers.helpers import map_item_to_schema, add_unique_items, get_user_preferred_genres
 
-# Configuración de logs para ver qué pasa realmente
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class RecommenderEngine:
     def __init__(self):
         pass
 
-    #  HELPERS (Utilería y Limpieza)
-    
-    def _parse_json_safe(self, data):
-        """Intenta parsear JSON de forma segura."""
-        if isinstance(data, dict): return data
-        if isinstance(data, str):
-            try: return json.loads(data)
-            except: 
-                try: return json.loads(data.replace("'", '"'))
-                except: return {}
-        return {}
-
-    def _map_item_to_schema(self, row):
-        """Mapeo final para que la API reciba los datos listos."""
-        attrs = self._parse_json_safe(row.get('attributes'))
-        
-        # Inyección híbrida: Si author/price están afuera, los metemos en attributes
-        if 'author' in row and row['author']: 
-            attrs['author'] = row['author']
-        if 'price' in row and row['price']: 
-            try: attrs['price'] = float(row['price'])
-            except: pass
-        
-        return {
-            "id": int(row['id']),
-            "name": str(row['name']),
-            "genre": row.get('genre'),
-            "attributes": attrs,
-            "recommendation_source": row.get('_source', 'unknown'),
-            "score": float(row.get('_score', 0.0))
-        }
-
-    def _get_user_preferred_genres(self, dbConnection, user_id):
-        """Obtiene géneros preferidos del usuario de forma robusta."""
-        try:
-            with dbConnection.cursor() as cur:
-                cur.execute("SELECT preferred_genres FROM users WHERE id = %s", (user_id,))
-                row = cur.fetchone()
-                if row and row['preferred_genres']:
-                    data = row['preferred_genres']
-                    # Manejar si Postgres devuelve lista o string JSON
-                    return data if isinstance(data, list) else json.loads(data) if isinstance(data, str) else []
-        except Exception as e:
-            logger.warning(f"Error leyendo géneros usuario {user_id}: {e}")
-            return []
-        return []
-
-    # ESTRATEGIA DE LLENADO EN CASCADA (Waterfall)
+    # ESTRATEGIA DE LLENADO EN CASCADA
 
     def get_recommendations(self, user_id: int, n: int):
         dbConnection = get_db_connection()
@@ -68,7 +19,7 @@ class RecommenderEngine:
         seen_ids = set() # Para evitar duplicados
         
         try:
-            # --- PASO 1: Intentar Colaborativo (Si hay historial) ---
+            # Intentamos primero con el colaborativo SOLO si el usuario tiene historial de preferencias
             has_history = False
             with dbConnection.cursor() as cur:
                 cur.execute("SELECT 1 FROM preferences WHERE user_id = %s LIMIT 1", (user_id,))
@@ -77,57 +28,41 @@ class RecommenderEngine:
             if has_history:
                 logger.info(f"User {user_id}: Ejecutando Colaborativo...")
                 collab_items = self._collaborative_strategy(dbConnection, user_id, n)
-                self._add_unique_items(final_recs, seen_ids, collab_items, n)
+                add_unique_items(final_recs, seen_ids, collab_items, n)
 
-            # --- PASO 2: Rellenar con Content-Based (Si faltan items) ---
+            # Si el colaborativo no llenó todas las recomendaciones, intentamos con el content-based.
             if len(final_recs) < n:
                 needed = n - len(final_recs)
-                genres = self._get_user_preferred_genres(dbConnection, user_id)
+                genres = get_user_preferred_genres(dbConnection, user_id)
                 
                 if genres:
                     logger.info(f"User {user_id}: Ejecutando Content-Based (Géneros: {genres})...")
                     # Pasamos seen_ids para excluir lo que ya recomendó el colaborativo
                     content_items = self._fetch_items_by_genres(dbConnection, genres, needed, exclude_ids=seen_ids)
-                    self._add_unique_items(final_recs, seen_ids, content_items, n)
+                    add_unique_items(final_recs, seen_ids, content_items, n)
 
-            # --- PASO 3: Rellenar con Popularidad (Respaldo final) ---
+            # Rellenar con Popularidad si todavia faltan recomendaciones.
             if len(final_recs) < n:
                 needed = n - len(final_recs)
-                logger.info(f"User {user_id}: Ejecutando Popularidad (Fallback)...")
+                logger.info(f"User {user_id}: Ejecutando Popularidad")
                 pop_items = self._fetch_popular_items(dbConnection, needed, exclude_ids=seen_ids)
-                self._add_unique_items(final_recs, seen_ids, pop_items, n)
+                add_unique_items(final_recs, seen_ids, pop_items, n)
 
             logger.info(f"Recomendación final: {len(final_recs)} items generados.")
             
-            # Mapeo final para cumplir contrato de API
-            return [self._map_item_to_schema(r) for r in final_recs]
+            return [map_item_to_schema(r) for r in final_recs]
 
         except Exception as e:
-            logger.error(f"Error CRÍTICO en get_recommendations: {e}")
+            logger.error(f"Error en get_recommendations: {e}")
             return []
         finally:
             dbConnection.close()
 
-    def _add_unique_items(self, target_list, seen_set, new_items, limit):
-        """Agrega items a la lista final respetando el límite y sin duplicados."""
-        for item in new_items:
-            if len(target_list) >= limit:
-                break
-            # Aseguramos que el ID sea int para el set
-            try: iid = int(item['id'])
-            except: continue
-            
-            if iid not in seen_set:
-                target_list.append(item)
-                seen_set.add(iid)
 
-    # MÉTODOS DE BÚSQUEDA (SQL CORREGIDO)
-
+    # Busca items que coincidan con los generos preferidos.
     def _fetch_items_by_genres(self, dbConnection, genres, limit, exclude_ids=None):
-        # Preparar patrones para búsqueda flexible (ej: '%Terror%')
         patterns = [f"%{g}%" for g in genres]
-        
-        # Consulta base
+
         query = """
             SELECT i.id, i.name, i.genre, i.attributes, i.author, i.price
             FROM items i
@@ -136,11 +71,10 @@ class RecommenderEngine:
         """
         params = [patterns]
 
-        # --- CORRECCIÓN CRÍTICA DE SQL ---
-        # Solo agregamos la cláusula AND NOT si la lista NO está vacía
+
         if exclude_ids and len(exclude_ids) > 0:
             query += " AND NOT (i.id = ANY(%s))"
-            params.append(list(exclude_ids)) # Postgres requiere lista para ANY
+            params.append(list(exclude_ids))
         
         query += " GROUP BY i.id ORDER BY COUNT(p.id) DESC LIMIT %s"
         params.append(limit)
@@ -163,7 +97,6 @@ class RecommenderEngine:
         """
         params = []
 
-        # Solo agregamos WHERE NOT si la lista NO está vacía
         if exclude_ids and len(exclude_ids) > 0:
             query += " WHERE NOT (i.id = ANY(%s))"
             params.append(list(exclude_ids))
@@ -181,11 +114,9 @@ class RecommenderEngine:
             logger.error(f"Error SQL Popularity: {e}")
             return []
 
-    # ESTRATEGIA COLABORATIVA
-
     def _collaborative_strategy(self, dbConnection, user_id, n):
         try:
-            # 1. Cargar preferencias
+
             with dbConnection.cursor() as cur:
                 cur.execute("SELECT user_id, item_id, value FROM preferences")
                 data = cur.fetchall()
@@ -193,7 +124,7 @@ class RecommenderEngine:
             
             if df_all.empty: return []
 
-            # Asegurar tipos numéricos para evitar errores de 'agg function failed'
+            # Asegurar tipos numéricos para evitar errores.
             df_all['value'] = pd.to_numeric(df_all['value'], errors='coerce').fillna(0)
             
             # 2. Pivot Table
@@ -220,11 +151,12 @@ class RecommenderEngine:
             if not candidate_ids: return []
 
             # 7. Obtener detalles de la BD
-            # Importante: Convertir IDs a tupla para SQL IN
+            
             if len(candidate_ids) == 1:
                 query_items = "SELECT * FROM items WHERE id = %s"
                 params = (candidate_ids[0],)
             else:
+                # si hay mas de una id candidata hay que pasarsela con un IN y como una tupla.
                 query_items = "SELECT * FROM items WHERE id IN %s"
                 params = (tuple(candidate_ids),)
 
@@ -234,7 +166,7 @@ class RecommenderEngine:
             
             df_items = pd.DataFrame(items_data)
             
-            # Reordenar según el puntaje de recomendación (SQL pierde el orden del IN)
+            # Reordenar segun el puntaje de recomendacion.
             df_items['sort_order'] = df_items['id'].apply(
                 lambda x: candidate_ids.index(x) if x in candidate_ids else 999
             )
@@ -243,8 +175,6 @@ class RecommenderEngine:
             results = df_items.to_dict(orient='records')
             for item in results: 
                 item['_source'] = 'collaborative'
-                # Inyectar el score (predicted rating)
-                # item['id'] es int, recs_scores index son ints
                 iid = item['id']
                 if iid in recs_scores:
                     item['_score'] = recs_scores[iid]
