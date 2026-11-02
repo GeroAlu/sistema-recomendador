@@ -1,8 +1,11 @@
-scikit-learn
-pandas
+fastapi
+uvicorn[standard]
 pydantic
 pydantic-settings
 psycopg2-binary
-fastapi
-uvicorn[standard]
+scikit-learn
+pandas
 python-dotenv
+httpx
+reportlab
+python-docx

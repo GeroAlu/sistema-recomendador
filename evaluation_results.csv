@@ -1,0 +1,9 @@
+Modelo,Top-N,TP,FP,FN,TN,Precision@k,Recall@k,F1-Score@k,Specificity,Accuracy,Hit Rate@k,Catalog Cov %,Avg Revenue/User ($),Incremento Ganancias vs 2025 (%)
+Baseline 2025: Carrusel Aleatorio,5,8,292,112,5588,0.0267,0.0667,0.0381,0.9503,0.9327,13.33,97.0,638.33,-31.24
+Baseline 2025: Carrusel Aleatorio,10,14,586,106,5294,0.0233,0.1167,0.0389,0.9003,0.8847,23.33,100.0,928.33,0.0
+Baseline: Top-N Popularidad,5,6,294,114,5586,0.02,0.05,0.0286,0.95,0.932,8.33,5.0,456.67,-50.81
+Baseline: Top-N Popularidad,10,16,584,104,5296,0.0267,0.1333,0.0444,0.9007,0.8853,23.33,10.0,1190.0,28.19
+Recomendador Híbrido (Cascada CF+CB+Pop),5,25,275,95,5605,0.0833,0.2083,0.119,0.9532,0.9383,40.0,69.0,1145.01,23.34
+Recomendador Híbrido (Cascada CF+CB+Pop),10,51,549,69,5331,0.085,0.425,0.1417,0.9066,0.897,66.67,88.0,2655.02,186.0
+Recomendador Híbrido + Re-ranking Prescriptivo,5,25,275,95,5605,0.0833,0.2083,0.119,0.9532,0.9383,40.0,69.0,1305.84,40.67
+Recomendador Híbrido + Re-ranking Prescriptivo,10,51,549,69,5331,0.085,0.425,0.1417,0.9066,0.897,66.67,88.0,2764.18,197.76
