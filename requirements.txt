@@ -1,7 +1,11 @@
-scikit-learn
-pandas
-pydantic
-psycopg2-binary
 fastapi
 uvicorn[standard]
+pydantic
+pydantic-settings
+psycopg2-binary
+scikit-learn
+pandas
 python-dotenv
+httpx
+reportlab
+python-docx

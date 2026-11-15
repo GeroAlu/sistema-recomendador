@@ -32,7 +32,7 @@ def map_item_to_schema(row):
         "genre": row.get('genre'),
         "attributes": attrs,
         "recommendation_source": row.get('_source', 'unknown'),
-        "score": float(row.get('_score', 0.0))
+        "score": round(float(row.get('_score', 0.0)), 2)
     }
 
 
