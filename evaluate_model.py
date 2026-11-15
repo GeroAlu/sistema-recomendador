@@ -18,6 +18,8 @@ Calcula:
 import sys
 import os
 import random
+import hashlib
+import json
 import numpy as np
 import pandas as pd
 from collections import defaultdict
@@ -33,6 +35,19 @@ from schemas import INTERACTION_WEIGHTS, InteractionType
 SEED = 42
 random.seed(SEED)
 np.random.seed(SEED)
+
+CASUAL_PURCHASE_RATE = 0.03 
+
+
+def casual_purchase(user_id, item_id, rate=CASUAL_PURCHASE_RATE):
+    """
+    Decide de forma determinista si el usuario compra casualmente un ítem recomendado.
+    Depende solo de (SEED, usuario, ítem) y no del modelo ni del orden de evaluación:
+    así dos modelos que recomiendan los mismos ítems obtienen exactamente el mismo ingreso.
+    """
+    digest = hashlib.md5(f"{SEED}:{user_id}:{item_id}".encode()).hexdigest()
+    return int(digest[:8], 16) / 0xFFFFFFFF < rate
+
 
 def fetch_catalog():
     conn = get_db_connection()
@@ -286,6 +301,24 @@ def run_rigorous_evaluation():
     print(f"Train Set: {len(train_interactions)} interacciones.")
     print(f"Test Set: {sum(len(v) for v in test_ground_truth.values())} compras/favoritos retenidos como Ground Truth.")
 
+    # Estadísticas del dataset: el informe las lee de evaluation_dataset.json
+    purchases_per_user = defaultdict(set)
+    for it in all_interactions:
+        if it["interaction_type"] == "PURCHASE":
+            purchases_per_user[it["user_id"]].add(it["item_id"])
+    purchase_counts = [len(purchases_per_user[u["id"]]) for u in users]
+    dataset_stats = {
+        "users": len(users),
+        "interactions": len(all_interactions),
+        "train_interactions": len(train_interactions),
+        "test_items": sum(len(v) for v in test_ground_truth.values()),
+        "purchases_min": min(purchase_counts),
+        "purchases_max": max(purchase_counts),
+        "purchases_mean": round(sum(purchase_counts) / len(purchase_counts), 1),
+        "seed": SEED,
+        "casual_purchase_rate": CASUAL_PURCHASE_RATE,
+    }
+
     # 3. Instanciar recomendador offline
     engine = SimulatedOfflineRecommender(catalog, train_interactions, users)
 
@@ -345,10 +378,10 @@ def run_rigorous_evaluation():
 
                 # Simulación de ingresos por usuario:
                 # Cada acierto (TP) genera una compra del precio real del libro recomendado.
-                # Además, una pequeña tasa basal de compra orgánica en FP (2% de compra casual).
+                # Además, una pequeña tasa basal de compra orgánica en FP (CASUAL_PURCHASE_RATE).
                 u_revenue = sum(float(catalog[iid - 1]["price"]) for iid in (rec_set & truth))
                 for fp_id in (rec_set - truth):
-                    if random.random() < 0.03: # 3% conversión casual
+                    if casual_purchase(u_id, fp_id):
                         u_revenue += float(catalog[fp_id - 1]["price"])
                 revenue_per_user.append(u_revenue)
 
@@ -395,6 +428,11 @@ def run_rigorous_evaluation():
     df_res.to_csv(out_csv, index=False)
     print(f"\nResultados exportados a {out_csv} exitosamente.")
 
+    out_json = "evaluation_dataset.json"
+    with open(out_json, "w", encoding="utf-8") as f:
+        json.dump(dataset_stats, f, indent=2)
+    print(f"Estadísticas del dataset exportadas a {out_json} exitosamente.")
+
     # Resumen de Matriz de Confusión para N=10
     print("\n" + "="*70)
     print("MATRICES DE CONFUSIÓN AGREGADAS (Top-10):")
@@ -403,7 +441,7 @@ def run_rigorous_evaluation():
         print(f"    [ TP: {row.TP:>4} | FP: {row.FP:>4} ]")
         print(f"    [ FN: {row.FN:>4} | TN: {row.TN:>4} ]")
         print(f"    Precision@10: {row._7*100:.2f}% | Recall@10: {row._8*100:.2f}% | F1: {row._9:.4f}")
-        print(f"    Ingreso Simulado por Usuario: ${row._13:,.2f} (Delta vs 2025: {row._14:+.2f}%)")
+        print(f"    Ingreso Simulado por Usuario: ${row._14:,.2f} (Delta vs 2025: {row._15:+.2f}%)")
 
     return df_res
 

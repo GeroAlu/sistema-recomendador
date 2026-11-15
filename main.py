@@ -1,9 +1,8 @@
 import sys
-import os
 import logging
 from fastapi import FastAPI
-from schemas import Error
 from database import get_db_connection, init_db
+from recommender import engine
 from routers.user import router as user_router
 from routers.preference import router as preference_router
 from routers.recommendation import router as recommendation_router
@@ -22,6 +21,16 @@ def startup_check_db():
     except Exception as e:
         logger.error(f"No se pudo conectar a la base de datos o inicializar tablas: {e}")
         sys.exit(1)
+
+    # Pobla user_similarities una vez al arrancar
+    try:
+        conn = get_db_connection()
+        try:
+            engine.compute_and_store_similarities(conn)
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"No se pudieron precalcular las similitudes al iniciar: {e}")
 
 # routers
 app.include_router(user_router)

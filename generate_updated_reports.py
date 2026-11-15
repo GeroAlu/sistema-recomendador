@@ -1,12 +1,12 @@
 """
 generate_updated_reports.py
-Genera el Informe Actualizado del Trabajo Integrador en formato Markdown (.md),
-Word (.docx) y PDF (.pdf), resolviendo el 100% de las observaciones docentes.
+Genera el Informe del Trabajo Integrador en formato Markdown (.md), Word (.docx) y PDF (.pdf).
 """
 
 import os
 import sys
 import re
+import json
 import pandas as pd
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
@@ -39,13 +39,128 @@ MD_PATH = os.path.join(TP_FINAL_DIR, "Informe_Actualizado.md")
 DOCX_PATH = os.path.join(TP_FINAL_DIR, "Informe_Actualizado.docx")
 PDF_PATH = os.path.join(TP_FINAL_DIR, "Informe_Actualizado.pdf")
 
-# Cargar métricas de evaluación empírica
+# Cargar métricas de evaluación empírica (fuente única de los números del informe)
 CSV_PATH = os.path.join(BASE_DIR, "evaluation_results.csv")
-if os.path.exists(CSV_PATH):
-    df_metrics = pd.read_csv(CSV_PATH)
-else:
-    df_metrics = None
+if not os.path.exists(CSV_PATH):
+    sys.exit(f"No se encontró {CSV_PATH}. Ejecutá primero: python evaluate_model.py")
+df_metrics = pd.read_csv(CSV_PATH)
 
+DATASET_PATH = os.path.join(BASE_DIR, "evaluation_dataset.json")
+if not os.path.exists(DATASET_PATH):
+    sys.exit(f"No se encontró {DATASET_PATH}. Ejecutá primero: python evaluate_model.py")
+with open(DATASET_PATH, encoding="utf-8") as _f:
+    dataset_stats = json.load(_f)
+
+M_RAND = "Baseline 2025: Carrusel Aleatorio"
+M_POP = "Baseline: Top-N Popularidad"
+M_HYB = "Recomendador Híbrido (Cascada CF+CB+Pop)"
+M_RR = "Recomendador Híbrido + Re-ranking Prescriptivo"
+DISPLAY_NAMES = {
+    M_RAND: "Carrusel Aleatorio (2025)",
+    M_POP: "Top-N Popularidad",
+    M_HYB: "Recomendador Híbrido",
+    M_RR: "Híbrido + Re-ranking Presc.",
+}
+
+
+def _es(x, dec=2):
+    """Formato numérico es-AR: 1.234,56."""
+    return f"{x:,.{dec}f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _row(model, n):
+    sel = df_metrics[(df_metrics["Modelo"] == model) & (df_metrics["Top-N"] == n)]
+    if sel.empty:
+        sys.exit(f"evaluation_results.csv no tiene la fila: {model} (Top-{n}). Volvé a ejecutar evaluate_model.py")
+    return sel.iloc[0]
+
+
+def build_dataset_section():
+    d = dataset_stats
+    test_pct = d["test_items"] / d["interactions"] * 100 if d["interactions"] else 0
+    return (
+        f"- **Población Sintética Controlada:** {_es(d['users'], 0)} usuarios distribuidos en 5 arquetipos de consumo literario "
+        "(*Sci-Fi/Distopía*, *Novela/Realismo Mágico*, *Terror/Thriller*, *Fantasía/Aventura*, *Clásico/Ensayo*), "
+        f"totalizando **{_es(d['interactions'], 0)} interacciones** de los cinco tipos, con entre {d['purchases_min']} y {d['purchases_max']} "
+        f"compras por usuario (media {_es(d['purchases_mean'], 1)}).\n"
+        "- **Partición Train / Test:** por cada usuario se retiene el 25% de sus compras y favoritos (mínimo 2) como conjunto de prueba.\n"
+        f"  - **Train Set:** {_es(d['train_interactions'], 0)} interacciones, utilizadas para poblar la matriz de preferencias y calcular similitudes.\n"
+        f"  - **Test Set (Ground Truth):** {_es(d['test_items'], 0)} compras y favoritos retenidos para evaluar la capacidad predictiva del recomendador.\n"
+        f"- **Reproducibilidad:** semilla aleatoria {d['seed']}; tasa de compra casual del {_es(d['casual_purchase_rate'] * 100, 0)}% sobre ítems recomendados no comprados."
+    )
+
+
+def build_confusion_matrices(n=10):
+    titles = [
+        (M_RAND, f"Baseline 2025 (Carrusel Aleatorio, N={n})"),
+        (M_POP, f"Baseline Top-N Popularidad (N={n})"),
+        (M_HYB, f"Recomendador Híbrido Propuesto (Cascada CF+CB+Pop, N={n})"),
+        (M_RR, f"Recomendador Híbrido + Re-ranking Prescriptivo por Precio (N={n})"),
+    ]
+    blocks = []
+    for model, title in titles:
+        r = _row(model, n)
+        tp, fp, fn, tn = (int(r[c]) for c in ("TP", "FP", "FN", "TN"))
+        blocks.append(
+            f"#### Matriz de Confusión: {title}\n"
+            "| | Relevante (Test) | No Relevante | Total |\n"
+            "| :---: | :---: | :---: | :---: |\n"
+            f"| **Recomendado (Top-{n})** | **TP = {_es(tp, 0)}** | **FP = {_es(fp, 0)}** | {_es(tp + fp, 0)} |\n"
+            f"| **No Recomendado** | **FN = {_es(fn, 0)}** | **TN = {_es(tn, 0)}** | {_es(fn + tn, 0)} |\n"
+            f"| **Total** | {_es(tp + fn, 0)} | {_es(fp + tn, 0)} | {_es(tp + fp + fn + tn, 0)} |\n"
+        )
+    return "\n".join(blocks)
+
+
+def build_metrics_table():
+    lines = [
+        "| Modelo Evaluado | Top-N | TP | FP | FN | TN | Precision@k | Recall@k | F1-Score | Specificity | Accuracy | Hit Rate@k | Catalog Cov. | Ingreso Medio / Usuario |",
+        "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
+    ]
+    for model in (M_RAND, M_POP, M_HYB, M_RR):
+        for n in (5, 10):
+            r = _row(model, n)
+            lines.append(
+                f"| **{DISPLAY_NAMES[model]}** | {n} | {_es(r['TP'], 0)} | {_es(r['FP'], 0)} | {_es(r['FN'], 0)} | {_es(r['TN'], 0)} "
+                f"| {_es(r['Precision@k'], 4)} | {_es(r['Recall@k'], 4)} | {_es(r['F1-Score@k'], 4)} | {_es(r['Specificity'], 4)} "
+                f"| {_es(r['Accuracy'], 4)} | {_es(r['Hit Rate@k'])}% | {_es(r['Catalog Cov %'], 1)}% | ${_es(r['Avg Revenue/User ($)'])} |"
+            )
+    return "\n".join(lines)
+
+
+def _change(old_v, new_v):
+    return f"{_es((new_v - old_v) / old_v * 100, 0)}%" if old_v else "n/d"
+
+
+def build_interpretation():
+    rand, pop, hyb = _row(M_RAND, 10), _row(M_POP, 10), _row(M_HYB, 10)
+    return (
+        "#### Interpretación Técnica de los Resultados:\n"
+        f"1. **Precisión y Sensitividad:** El Recomendador Híbrido pasa de un Recall@10 de **{_es(rand['Recall@k'] * 100)}% a {_es(hyb['Recall@k'] * 100)}%** "
+        f"({_change(rand['Recall@k'], hyb['Recall@k'])}) y de una Precision@10 de **{_es(rand['Precision@k'] * 100)}% a {_es(hyb['Precision@k'] * 100)}%** "
+        f"({_change(rand['Precision@k'], hyb['Precision@k'])}) respecto al carrusel aleatorio del año 2025.\n"
+        f"2. **Tasa de Acierto (Hit Rate@10):** Pasa del **{_es(rand['Hit Rate@k'])}% al {_es(hyb['Hit Rate@k'])}%** de los usuarios con al menos un acierto.\n"
+        "3. **Re-ranking prescriptivo:** Al reordenar los mismos ítems, no modifica TP, FP, FN ni TN, y por lo tanto tampoco las métricas de clasificación ni el ingreso simulado.\n"
+        f"4. **Diversidad de Catálogo (Catalog Coverage):** La popularidad pura recomienda solo el {_es(pop['Catalog Cov %'], 1)}% de los libros; "
+        f"el sistema híbrido cubre el **{_es(hyb['Catalog Cov %'], 1)}% del catálogo**."
+    )
+
+
+def build_financial_list():
+    rand, hyb = _row(M_RAND, 10), _row(M_HYB, 10)
+    base, new = float(rand["Avg Revenue/User ($)"]), float(hyb["Avg Revenue/User ($)"])
+    delta = (new - base) / base * 100 if base else 0.0
+    verdict = "lo que supera el objetivo del +10%" if delta >= 10 else "lo que no alcanza el objetivo del +10%"
+    return (
+        f"- **Año 2025 (Carrusel Aleatorio, N=10):** ingreso promedio simulado de **${_es(base)} por usuario**.\n"
+        f"- **Año 2026 (Recomendador Híbrido, N=10):** ingreso promedio simulado de **${_es(new)} por usuario** "
+        f"({'+' if delta >= 0 else ''}{_es(delta)}% frente al carrusel aleatorio), {verdict}.\n"
+        "- **Re-ranking prescriptivo:** no cambia los libros recomendados, por lo que el ingreso simulado es idéntico al del híbrido. "
+        "Su efecto sobre la facturación real depende del comportamiento de compra frente al orden de la lista y no se midió."
+    )
+
+
+os.makedirs(TP_FINAL_DIR, exist_ok=True)
 print(f"Generando entregables en: {TP_FINAL_DIR}")
 
 # -----------------------------------------------------------------------------
@@ -58,7 +173,7 @@ md_content = """# Universidad Tecnológica Nacional
 ---
 
 # Trabajo Práctico Integrador: Sistema Recomendador Híbrido para Comercio Electrónico
-**Metodología CRISP-DM — Versión Final Post-Correcciones**
+**Metodología CRISP-DM**
 
 **Integrantes:**
 - Alu, Gerónimo
@@ -80,39 +195,32 @@ md_content = """# Universidad Tecnológica Nacional
    - 1.1 Contexto y descripción del problema
    - 1.2 Objetivo de negocio
    - 1.3 Objetivos de Data Mining
-   - 1.4 Criterios de éxito técnico y comercial
-   - 1.5 Evaluación de la situación y plan de contingencia
+   - 1.4 Criterios de éxito
 2. [Entendimiento de los Datos (Data Understanding)](#2---entendimiento-de-los-datos)
    - 2.1 Descripción de las fuentes de información
-   - 2.2 Diseño de atributos de las entidades (Items y Users)
+   - 2.2 Diseño de atributos de las entidades
    - 2.3 Diseño del esquema relacional en PostgreSQL
-   - 2.4 Generación del catálogo semilla (100 libros)
-   - 2.5 Verificación de la calidad, tipado estricto e integridad
-   - 2.6 Análisis exploratorio de datos (EDA)
+   - 2.4 Verificación de la calidad, tipado estricto e integridad
+   - 2.5 Análisis exploratorio de datos
 3. [Preparación de los Datos (Data Preparation)](#3---preparación-de-los-datos)
    - 3.1 Proceso de extracción y canalización de datos
-   - 3.2 Selección de variables y filtrado dinámico
-   - 3.3 Especificación del endpoint `/preference` y escala multivariable
-   - 3.4 Desacoplamiento computacional: persistencia asíncrona de similitudes
+   - 3.2 Especificación del endpoint `/preference` y escala multivariable
+   - 3.3 Desacoplamiento computacional: persistencia de similitudes
 4. [Modelado (Modeling)](#4---modelado)
-   - 4.1 Arquitectura híbrida en cascada (Switching & Cascade)
-   - 4.2 Filtro Colaborativo en memoria optimizado ($O(1)$)
-   - 4.3 Filtro Basado en Contenido (Content-Based)
-   - 4.4 Respaldo por Popularidad Global (Best Sellers)
-   - 4.5 Estrategia para el problema de arranque en frío (Cold Start)
-   - 4.6 Analítica Prescriptiva: Re-ranking por precio y margen comercial
-   - 4.7 Flujo de inferencia secuencial
-5. [Evaluación Experimental Rigurosa (Evaluation)](#5---evaluación)
-   - 5.1 Metodología experimental y dataset de prueba (Test Benchmark)
-   - 5.2 Matrices de Confusión experimentales (Top-5 y Top-10)
+   - 4.1 Arquitectura híbrida en cascada
+   - 4.2 Filtro Colaborativo
+   - 4.3 Analítica Prescriptiva: Re-ranking por precio
+   - 4.4 Mitigación del problema de Cold Start
+5. [Evaluación (Evaluation)](#5---evaluación)
+   - 5.1 Metodología experimental y dataset de prueba
+   - 5.2 Matrices de Confusión experimentales
    - 5.3 Métricas cuantitativas de clasificación y ranking
-   - 5.4 Simulación financiera: Validación del objetivo de negocio (+10% en ganancias)
-   - 5.5 Revisión técnica del proceso: Desmitificación de alucinaciones y mejoras reales
-6. [Despliegue y Operaciones (Deployment)](#6---despliegue)
+   - 5.4 Simulación financiera y objetivo de negocio
+6. [Despliegue (Deployment)](#6---despliegue)
    - 6.1 Arquitectura de despliegue REST modular
-   - 6.2 Estrategia de seguridad, validación de variables y rotación de secretos
-   - 6.3 Plan de monitoreo, concurrencia y mantenimiento
-   - 6.4 Conclusiones del informe final
+   - 6.2 Seguridad y gestión de credenciales
+   - 6.3 Plan de monitoreo y concurrencia
+   - 6.4 Conclusiones
 
 ---
 
@@ -215,7 +323,7 @@ CREATE TABLE IF NOT EXISTS user_similarities (
 La integridad de los datos se garantiza en múltiples capas:
 1. **Tipado Estricto en FastAPI:** Pydantic valida estrictamente todas las entradas HTTP. El tipo de interacción está tipado mediante el enum `InteractionType`, rechazando automáticamente cadenas arbitrarias (`HTTP 422`).
 2. **Restricciones Relacionales:** Claves foráneas y tipos nativos (`INTEGER`, `REAL`, `JSONB`) en PostgreSQL impiden inconsistencias de tipo o referencias huérfanas.
-3. **Conversión Defensiva en Modelado:** En `recommender.py`, las operaciones vectoriales utilizan `pd.to_numeric(..., errors='coerce').fillna(0)` como defensa ante posibles nulos en la matriz dispersa, no por formatos corruptos en la base de datos.
+3. **Conversión Defensiva en Modelado:** En `recommender.py`, las operaciones vectoriales utilizan `pd.to_numeric(..., errors='coerce').fillna(0)` como defensa ante valores nulos en la matriz dispersa usuario-ítem.
 
 ### 2.5 - Análisis exploratorio de datos (EDA)
 - **Catálogo:** 100 libros distribuidos en 23 géneros literarios. Predomina *Novela* (23%), *Ciencia Ficción* (8%), *Fantasía* (8%) y *Thriller* (7%), junto a categorías de nicho (*Ensayo*, *Terror*, *Infantil*, *Divulgación*).
@@ -231,7 +339,7 @@ Los datos se extraen mediante consultas parametrizadas en PostgreSQL evitando tr
 - La lista de candidatos de catálogo se recupera mediante indexación por lote (`id = ANY(%s)`).
 
 ### 3.2 - Especificación del endpoint `/preference` y escala multivariable
-En respuesta a las correcciones docentes respecto a la antigua escala binaria (`PURCHASE=10`, `ELSE=1`), se diseñó un modelo de **preferencias implícitas y explícitas multidimensional** graduado según el embudo de conversión e-commerce:
+Se diseñó un modelo de **preferencias implícitas y explícitas multidimensional** graduado según el embudo de conversión e-commerce:
 
 ```
 [VIEW: 1] -> [SEARCH: 2] -> [ADD_TO_CART: 5] -> [FAVORITE: 7] -> [PURCHASE: 10]
@@ -245,11 +353,12 @@ En respuesta a las correcciones docentes respecto a la antigua escala binaria (`
 | `FAVORITE` | 7 | Afinidad explícita duradera | **Se excluye** (el usuario ya lo atesora). |
 | `PURCHASE` | 10 | Conversión efectiva concretada | **Se excluye** (evitar recomendar lo ya adquirido). |
 
-### 3.3 - Desacoplamiento computacional: persistencia asíncrona de similitudes
-Para resolver el problema crítico de escalabilidad y concurrencia advertido por la cátedra (colapso con 1000 usuarios concurrentes):
-1. **Almacenamiento Persistente:** Las similitudes usuario-usuario se persisten en la tabla `user_similarities`.
-2. **Cómputo en Segundo Plano (`BackgroundTasks`):** Cada vez que un cliente registra una interacción mediante `POST /preference`, la respuesta HTTP retorna de inmediato ($< 25\text{ ms}$) y se agenda una tarea asíncrona no bloqueante que recalcula y actualiza la matriz en PostgreSQL mediante `execute_values` con cláusula `ON CONFLICT DO UPDATE`.
-3. **Inferencia en Tiempo O(1):** El endpoint de recomendación no realiza productos vectoriales sobre la base completa, sino un simple `SELECT user_id_2, similarity_score FROM user_similarities WHERE user_id_1 = %s ORDER BY similarity_score DESC LIMIT 5`, reduciendo drásticamente el consumo de CPU y memoria.
+### 3.3 - Desacoplamiento computacional: persistencia de similitudes
+Para sostener la escalabilidad y la concurrencia (muchos usuarios consultando a la vez), el cálculo de similitudes se separa de la inferencia:
+1. **Almacenamiento Persistente:** Las similitudes usuario-usuario se persisten en la tabla `user_similarities`. Se precalculan una vez al iniciar el servicio.
+2. **Recálculo en Segundo Plano (`BackgroundTasks`):** El endpoint `POST /preference` registra la interacción y responde de inmediato. Solo las señales fuertes (`ADD_TO_CART`, `FAVORITE`, `PURCHASE`) agendan el recálculo; `VIEW` y `SEARCH`, que ocurren constantemente durante la navegación, no lo disparan. Si ya hay un recálculo en curso, el nuevo se omite y el siguiente evento fuerte lo vuelve a agendar. El reemplazo de la tabla (`DELETE` + `INSERT` con `execute_values`) ocurre en una única transacción.
+3. **Inferencia sin cómputo vectorial:** El endpoint de recomendación no recalcula similitudes. Ejecuta una consulta indexada por clave primaria: `SELECT user_id_2, similarity_score FROM user_similarities WHERE user_id_1 = %s ORDER BY similarity_score DESC LIMIT 5`.
+4. **Limitaciones conocidas:** `BackgroundTasks` se ejecuta dentro del mismo proceso del servidor, y cada recálculo procesa la matriz completa de preferencias. La protección contra recálculos simultáneos es local a cada proceso. En un entorno de producción con varios procesos o alto volumen de eventos fuertes, el recálculo debería delegarse a un trabajo periódico o a una cola.
 
 ---
 
@@ -276,7 +385,9 @@ Para conectar el algoritmo directamente con el objetivo de negocio (+10% en gana
 
 $$\text{Score}_{\text{final}}(u, i) = \text{Score}_{\text{rec}}(u, i) \cdot \left(1 + \alpha \cdot \frac{P_i - P_{\min}}{P_{\max} - P_{\min}}\right)$$
 
-Con $\alpha = 0.20$. Esto garantiza que ante dos obras literarias con afinidad similar para el lector, el sistema dará prioridad a aquella con mayor precio y margen unitario, maximizando el ticket promedio sin sacrificar la satisfacción del usuario.
+Con $\alpha = 0.20$ y $P_{\min}$, $P_{\max}$ tomados del catálogo completo. El re-ranking se aplica dentro de cada estrategia de la cascada (colaborativa, contenido, popularidad), porque sus puntajes no son comparables entre sí. Ante dos obras de afinidad similar, el sistema prioriza la de mayor precio.
+
+El re-ranking **solo modifica el orden** de los ítems de cada estrategia: no cambia qué libros se recomiendan, por lo que no altera los aciertos medidos en la evaluación. Su efecto sobre la facturación no se mide en este trabajo; se presenta como una decisión de diseño alineada con el objetivo de negocio.
 
 ### 4.4 - Mitigación del problema de Cold Start
 - **Usuario Nuevo con Géneros Declarados:** Se activa en modo *Content-Based*, recuperando los libros más populares de sus categorías de interés.
@@ -288,11 +399,8 @@ Con $\alpha = 0.20$. Esto garantiza que ante dos obras literarias con afinidad s
 ## 5 - Evaluación
 
 ### 5.1 - Metodología experimental y dataset de prueba (Test Benchmark)
-Siguiendo las pautas metodológicas de CRISP-DM y las observaciones de la cátedra, se construyó un entorno de evaluación cuantitativo riguroso:
-- **Población Sintética Controlada:** 60 usuarios distribuidos en 5 arquetipos de consumo literario (*Sci-Fi/Distopía*, *Novela/Realismo Mágico*, *Terror/Thriller*, *Fantasía/Aventura*, *Clásico/Ensayo*), totalizando **2.206 interacciones reales** con distribución normal de compras (7 a 10 por usuario, media 8.2).
-- **Partición Train / Test:**
-  - **Train Set (75%):** 2.031 interacciones utilizadas para poblar la matriz de preferencias y calcular similitudes.
-  - **Test Set (Ground Truth, 25%):** 120 compras y favoritos retenidos temporalmente para evaluar la capacidad predictiva del recomendador.
+Siguiendo las pautas metodológicas de CRISP-DM, se construyó un entorno de evaluación cuantitativo:
+@@DATASET@@
 
 ### 5.2 - Matrices de Confusión experimentales
 Para cada usuario, la recomendación de Top-$N$ libros sobre el catálogo total de 100 obras clasifica a cada ítem en:
@@ -301,69 +409,21 @@ Para cada usuario, la recomendación de Top-$N$ libros sobre el catálogo total 
 - **Falso Negativo (FN):** Ítem que el usuario compró en el Test Set pero el modelo no llegó a sugerir.
 - **Verdadero Negativo (TN):** Ítem no recomendado que el usuario no compró (resto del catálogo de 100 libros).
 
-A continuación se presentan las **Matrices de Confusión Agregadas** evaluadas sobre los 60 usuarios (6.000 clasificaciones totales para $N=10$):
+A continuación se presentan las **Matrices de Confusión Agregadas** evaluadas sobre los usuarios del benchmark (una clasificación por cada libro del catálogo y por cada usuario, para $N=10$):
 
-#### Matriz de Confusión: Baseline 2025 (Carrusel Aleatorio, N=10)
-| | Relevante (Test) | No Relevante | Total |
-| :---: | :---: | :---: | :---: |
-| **Recomendado (Top-10)** | **TP = 14** | **FP = 586** | 600 |
-| **No Recomendado** | **FN = 106** | **TN = 5.294** | 5.400 |
-| **Total** | 120 | 5.880 | 6.000 |
-
-#### Matriz de Confusión: Baseline Top-N Popularidad (N=10)
-| | Relevante (Test) | No Relevante | Total |
-| :---: | :---: | :---: | :---: |
-| **Recomendado (Top-10)** | **TP = 16** | **FP = 584** | 600 |
-| **No Recomendado** | **FN = 104** | **TN = 5.296** | 5.400 |
-| **Total** | 120 | 5.880 | 6.000 |
-
-#### Matriz de Confusión: Recomendador Híbrido Propuesto (Cascada CF+CB+Pop, N=10)
-| | Relevante (Test) | No Relevante | Total |
-| :---: | :---: | :---: | :---: |
-| **Recomendado (Top-10)** | **TP = 51** | **FP = 549** | 600 |
-| **No Recomendado** | **FN = 69** | **TN = 5.331** | 5.400 |
-| **Total** | 120 | 5.880 | 6.000 |
-
-#### Matriz de Confusión: Recomendador Híbrido + Re-ranking Prescriptivo por Precio (N=10)
-| | Relevante (Test) | No Relevante | Total |
-| :---: | :---: | :---: | :---: |
-| **Recomendado (Top-10)** | **TP = 51** | **FP = 549** | 600 |
-| **No Recomendado** | **FN = 69** | **TN = 5.331** | 5.400 |
-| **Total** | 120 | 5.880 | 6.000 |
+@@MATRICES@@
 
 ### 5.3 - Métricas cuantitativas de clasificación y ranking
 
-| Modelo Evaluado | Top-N | TP | FP | FN | TN | Precision@k | Recall@k | F1-Score | Specificity | Accuracy | Hit Rate@k | Catalog Cov. | Ingreso Medio / Usuario |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Carrusel Aleatorio (2025)** | 5 | 8 | 292 | 112 | 5.588 | 0,0267 | 0,0667 | 0,0381 | 0,9503 | 0,9327 | 13,33% | 97,0% | $638,33 |
-| **Carrusel Aleatorio (2025)** | 10 | 14 | 586 | 106 | 5.294 | 0,0233 | 0,1167 | 0,0389 | 0,9003 | 0,8847 | 23,33% | 100,0% | $928,33 |
-| **Top-N Popularidad** | 5 | 6 | 294 | 114 | 5.586 | 0,0200 | 0,0500 | 0,0286 | 0,9500 | 0,9320 | 8,33% | 5,0% | $456,67 |
-| **Top-N Popularidad** | 10 | 16 | 584 | 104 | 5.296 | 0,0267 | 0,1333 | 0,0444 | 0,9007 | 0,8853 | 23,33% | 10,0% | $1.190,00 |
-| **Recomendador Híbrido** | 5 | 25 | 275 | 95 | 5.605 | 0,0833 | 0,2083 | 0,1190 | 0,9532 | 0,9383 | 40,00% | 69,0% | $1.145,01 |
-| **Recomendador Híbrido** | 10 | 51 | 549 | 69 | 5.331 | **0,0850** | **0,4250** | **0,1417** | **0,9066** | **0,8970** | **66,67%** | **88,0%** | $2.655,02 |
-| **Híbrido + Re-ranking Presc.** | 5 | 25 | 275 | 95 | 5.605 | 0,0833 | 0,2083 | 0,1190 | 0,9532 | 0,9383 | 40,00% | 69,0% | **$1.305,84** |
-| **Híbrido + Re-ranking Presc.** | 10 | 51 | 549 | 69 | 5.331 | **0,0850** | **0,4250** | **0,1417** | **0,9066** | **0,8970** | **66,67%** | **88,0%** | **$2.764,18** |
+@@TABLA_METRICAS@@
 
-#### Interpretación Técnica de los Resultados:
-1. **Precisión y Sensitividad:** El Recomendador Híbrido incrementa el Recall@10 de **11,67% a 42,50% (+264%)** y la Precision@10 de **2,33% a 8,50% (+265%)** respecto al carrusel aleatorio del año 2025.
-2. **Tasa de Acierto (Hit Rate@10):** Aumenta del **23,33% al 66,67%**. Es decir, dos de cada tres clientes encontrarán al menos una sugerencia altamente atractiva que terminarán comprando.
-3. **Diversidad de Catálogo (Catalog Coverage):** Mientras que la popularidad pura queda estancada en recomendar sólo el 10% de los libros, nuestro sistema híbrido cubre el **88,0% del catálogo**, protegiendo las ventas de obras literarias de nicho.
+@@INTERPRETACION@@
 
-### 5.4 - Simulación financiera: Validación del objetivo de negocio (+10% en ganancias)
-Para validar la meta comercial fijada por el comitente, se simuló el valor de las transacciones resultantes:
-- **Año 2025 (Carrusel Aleatorio, N=10):** Facturación promedio proyectada de **$928,33 por usuario**.
-- **Año 2026 (Recomendador Híbrido Estándar, N=10):** Facturación promedio de **$2.655,02 por usuario** (+186,00%).
-- **Año 2026 (Recomendador Híbrido con Re-ranking Prescriptivo, N=10):** Facturación promedio de **$2.764,18 por usuario**, logrando un crecimiento del **+197,76%** frente a 2025 y un **+4,11% adicional** puramente atribuible a la optimización de precios.
-- **Análisis en Top-5 ($N=5$):** Al evaluar carruseles reducidos de 5 artículos, el Re-ranking Prescriptivo incrementa la facturación de $1.145,01 a **$1.305,84 por usuario**, un **incremento neto del +14,05%**, superando con solvencia el **10% exigido** por el cliente.
+### 5.4 - Simulación financiera y objetivo de negocio
+El ingreso por usuario es una **simulación** con dos supuestos explícitos del equipo: (a) cada acierto (TP) genera una compra por el precio real del libro, y (b) cada libro recomendado que el usuario no compró tiene una probabilidad del 3% de comprarse de forma casual. La compra casual se decide de manera determinista por par (usuario, libro), de modo que dos modelos que recomiendan los mismos libros obtienen el mismo ingreso.
+@@FINANCIERA@@
 
-### 5.5 - Revisión técnica del proceso: Desmitificación de alucinaciones y mejoras reales
-En la entrega anterior, una redacción descuidada mencionó que los datos presentaban "formatos mezclados de texto y números que requirieron limpieza forzada". La cátedra cuestionó con absoluta razón este punto: al diseñar nosotros mismos la base de datos y la API, es técnicamente imposible que ingresaran tipos mezclados.
-
-**Aclaración y Realidad Técnica del Proyecto:**
-1. **Tipado Estricto de Entrada:** Gracias a Pydantic en FastAPI, el endpoint `/preference` valida en tiempo de compilación y ejecución que `interactionType` pertenezca al enum `InteractionType` (`VIEW`, `SEARCH`, `ADD_TO_CART`, `FAVORITE`, `PURCHASE`), garantizando homogeneidad absoluta.
-2. **Mapeo Numérico Ponderado:** La conversión a números enteros no responde a una "limpieza de strings corruptos", sino a la asignación de pesos conductuales del negocio (1, 2, 5, 7, 10) requerida para que el álgebra lineal de la Similitud del Coseno opere correctamente sobre la matriz dispersa.
-3. **Manejo Defensivo de Matrices:** La instrucción `pd.to_numeric(..., errors='coerce').fillna(0)` en `recommender.py` se utiliza exclusivamente como salvaguarda ante celdas no interactuadas de la matriz usuario-ítem (imputación de ceros en matrices dispersas).
-4. **Seguridad y Secretos:** Se eliminó la exposición involuntaria de credenciales en `.env.example`, reemplazándolas por valores de prueba locales, y se implementó la clase `Settings` con `pydantic-settings` para abortar la inicialización si faltan variables críticas del entorno (*fail-fast pattern*).
+Los resultados dependen de un dataset sintético y de los supuestos anteriores; deben interpretarse como evidencia de la capacidad predictiva del modelo y no como una proyección de facturación real.
 
 ---
 
@@ -379,26 +439,32 @@ El sistema se organiza en una arquitectura limpia y desacoplada:
 - `routers/`: Separación modular de endpoints:
   - `user.py`: `POST /user`, `GET /user/{userId}`
   - `recommendation.py`: `GET /user/{userId}/recommend` con verificación estricta de existencia de usuario (`HTTP 404` en caso negativo).
-  - `preference.py`: `POST /preference` con ejecución asíncrona de actualización de similitudes mediante `BackgroundTasks`.
+  - `preference.py`: `POST /preference` con actualización asíncrona de similitudes (solo ante eventos fuertes) mediante `BackgroundTasks`.
 - `evaluate_model.py`: Suite de evaluación empírica reproducible que computa matrices de confusión y métricas CRISP-DM.
 
 ### 6.2 - Estrategia de seguridad y rotación de credenciales
 - Archivo `.env.example` sanitizado completamente con placeholders genéricos (`localhost`, `postgres`, `your_secure_password`).
 - Inclusión garantizada de `.env` en `.gitignore`.
-- Las contraseñas de la instancia Neon fueron rotadas inmediatamente tras la advertencia docente.
+- Las credenciales de la base de datos se cargan exclusivamente desde variables de entorno (`.env` o variables estándar de PostgreSQL) y nunca se versionan.
 
 ### 6.3 - Plan de monitoreo y concurrencia
-- **Manejo de Concurrencia:** Con la persistencia en `user_similarities` y la consulta directa indexada por clave primaria, la latencia de recomendación se mantiene en $O(1)$ lecturas por petición, permitiendo atender con holgura más de 1.000 usuarios concurrentes.
+- **Manejo de Concurrencia:** Con la persistencia en `user_similarities` y la consulta directa indexada por clave primaria, cada recomendación se resuelve con lecturas indexadas por clave primaria, sin recalcular similitudes dentro de la petición.
 - **Niveles de Logging:** Configuración estructurada con niveles `INFO` (flujo y estrategia seleccionada), `WARNING` (activación de fallbacks) y `ERROR` (fallos transaccionales o desconexión).
 
-### 6.4 - Conclusiones del informe final
-El proyecto evolucionó desde un prototipo conceptual hasta un sistema recomendador de grado profesional. Se resolvieron en su totalidad las observaciones docentes:
-1. Se generó un benchmark de interacciones realista y coherente, reportando métricas cuantitativas formales a partir de matrices de confusión empíricas.
-2. Se eliminó la contradicción de los "formatos mezclados", justificando la arquitectura real de tipado estricto.
-3. Se superó la escala binaria mediante un espectro de 5 niveles de interacción.
-4. Se blindó la escalabilidad y concurrencia mediante persistencia de similitudes y tareas asíncronas en segundo plano.
-5. Se eliminó el riesgo de seguridad en credenciales y se optimizó el código para cumplir al 100% la especificación OpenAPI provista.
+### 6.4 - Conclusiones
+Se implementó un sistema recomendador híbrido en cascada (colaborativo, basado en contenido y popularidad) expuesto mediante una API REST, con persistencia de similitudes, una escala de preferencias de cinco niveles y un re-ranking por precio alineado al objetivo comercial.
+1. El recomendador híbrido supera a los baselines aleatorio y de popularidad en precisión, recall y tasa de acierto sobre el dataset sintético de evaluación.
+2. La escala de preferencias de cinco niveles (`VIEW`, `SEARCH`, `ADD_TO_CART`, `FAVORITE`, `PURCHASE`) permite distinguir distintos grados de interés.
+3. La persistencia de similitudes evita recalcularlas en cada recomendación; el recálculo se agenda en segundo plano ante eventos fuertes.
+4. Como trabajo futuro: delegar el recálculo a un trabajo periódico o una cola, y medir el efecto del re-ranking sobre la conversión con datos reales.
 """
+
+md_content = (md_content
+    .replace("@@DATASET@@", build_dataset_section())
+    .replace("@@MATRICES@@", build_confusion_matrices(10))
+    .replace("@@TABLA_METRICAS@@", build_metrics_table())
+    .replace("@@INTERPRETACION@@", build_interpretation())
+    .replace("@@FINANCIERA@@", build_financial_list()))
 
 # Guardar Markdown
 with open(MD_PATH, "w", encoding="utf-8") as f:
@@ -447,7 +513,7 @@ def create_styled_docx():
     run_title.font.bold = True
     run_title.font.color.rgb = RGBColor(31, 78, 121)
 
-    run_sub = title_p.add_run("Metodología CRISP-DM — Versión Final Post-Correcciones\n\n\n\n")
+    run_sub = title_p.add_run("Metodología CRISP-DM\n\n\n\n")
     run_sub.font.size = Pt(13)
     run_sub.font.italic = True
 
@@ -621,7 +687,7 @@ class NumberedCanvas(canvas.Canvas):
             self.line(54, 45, 558, 45)
             page_text = f"Página {self._pageNumber} de {page_count}"
             self.drawRightString(558, 32, page_text)
-            self.drawString(54, 32, "Metodología CRISP-DM — Versión Final Post-Correcciones")
+            self.drawString(54, 32, "Metodología CRISP-DM")
             self.restoreState()
 
 def create_styled_pdf():
@@ -729,7 +795,7 @@ def create_styled_pdf():
     story.append(Spacer(1, 30))
     story.append(Paragraph("TRABAJO PRÁCTICO INTEGRADOR<br/>SISTEMA RECOMENDADOR HÍBRIDO<br/>PARA COMERCIO ELECTRÓNICO", title_style))
     story.append(HRFlowable(width="60%", thickness=2, color=colors.HexColor("#1F4E79"), spaceBefore=10, spaceAfter=15))
-    story.append(Paragraph("<i>Metodología CRISP-DM — Versión Final Post-Correcciones</i>", ParagraphStyle('Sub', parent=title_style, fontSize=11, leading=14, textColor=colors.HexColor("#444444"))))
+    story.append(Paragraph("<i>Metodología CRISP-DM</i>", ParagraphStyle('Sub', parent=title_style, fontSize=11, leading=14, textColor=colors.HexColor("#444444"))))
     story.append(Spacer(1, 60))
 
     cover_info = """

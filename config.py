@@ -1,15 +1,20 @@
 import os
 from typing import Optional
-from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+
 class Settings(BaseSettings):
-    DB_HOST: Optional[str] = Field(default=None, validation_alias="DB_HOST")
-    DB_PORT: int = Field(default=5432, validation_alias="DB_PORT")
-    DB_NAME: Optional[str] = Field(default=None, validation_alias="DB_NAME")
-    DB_USER: Optional[str] = Field(default=None, validation_alias="DB_USER")
-    DB_PASSWORD: Optional[str] = Field(default=None, validation_alias="DB_PASSWORD")
-    DB_SSLMODE: Optional[str] = Field(default="prefer", validation_alias="DB_SSLMODE")
+    DB_HOST: Optional[str] = None
+    DB_PORT: Optional[int] = None
+    DB_NAME: Optional[str] = None
+    DB_USER: Optional[str] = None
+    DB_PASSWORD: Optional[str] = None
+    DB_SSLMODE: Optional[str] = None
+
+    # Parámetros del recomendador
+    COLLAB_SMOOTHING: float = 1.0        
+    RERANK_ALPHA: float = 0.2       
+    MAX_RECOMMENDATIONS: int = 100
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -26,26 +31,24 @@ class Settings(BaseSettings):
         return self.DB_PASSWORD or os.getenv("PGPASSWORD", "")
 
     def get_port(self) -> int:
+        if self.DB_PORT:
+            return self.DB_PORT
         port_val = os.getenv("PGPORT")
-        if port_val and port_val.isdigit():
-            return int(port_val)
-        return self.DB_PORT
+        return int(port_val) if port_val and port_val.isdigit() else 5432
 
     def get_sslmode(self) -> str:
-        return os.getenv("PGSSLMODE") or self.DB_SSLMODE or "prefer"
+        return self.DB_SSLMODE or os.getenv("PGSSLMODE") or "prefer"
 
     def validate_connection_params(self):
-        host = self.get_host()
-        database = self.get_database()
-        user = self.get_user()
-        password = self.get_password()
-        
-        if not (host and database and user and password):
-            missing = []
-            if not host: missing.append("DB_HOST / PGHOST")
-            if not database: missing.append("DB_NAME / PGDATABASE")
-            if not user: missing.append("DB_USER / PGUSER")
-            if not password: missing.append("DB_PASSWORD / PGPASSWORD")
+        required = {
+            "DB_HOST / PGHOST": self.get_host(),
+            "DB_NAME / PGDATABASE": self.get_database(),
+            "DB_USER / PGUSER": self.get_user(),
+            "DB_PASSWORD / PGPASSWORD": self.get_password(),
+        }
+        missing = [name for name, value in required.items() if not value]
+        if missing:
             raise ValueError(f"Faltan variables de entorno requeridas para la base de datos: {', '.join(missing)}")
+
 
 settings = Settings()
