@@ -1,0 +1,11 @@
+{
+  "users": 60,
+  "interactions": 2206,
+  "train_interactions": 2031,
+  "test_items": 120,
+  "purchases_min": 7,
+  "purchases_max": 10,
+  "purchases_mean": 8.5,
+  "seed": 42,
+  "casual_purchase_rate": 0.03
+}
